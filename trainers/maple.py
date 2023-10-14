@@ -25,6 +25,7 @@ def load_clip_to_cpu(cfg):
 
     try:
         # loading JIT archive
+        # torch.jit: Just-In-Time TorchScript 모델의 직렬화와 로드 지원, 모델을 더 빠르게 실행할 수 있도록 함
         model = torch.jit.load(model_path, map_location="cpu").eval()
         state_dict = None
 
@@ -70,8 +71,9 @@ class MultiModalPromptLearner(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
         n_cls = len(classnames)
-        n_ctx = cfg.TRAINER.MAPLE.N_CTX
-        ctx_init = cfg.TRAINER.MAPLE.CTX_INIT
+        n_ctx = cfg.TRAINER.MAPLE.N_CTX # 2, number of context vectors
+        #ctx_init = cfg.TRAINER.MAPLE.CTX_INIT # "a photo of a"  # initialization words
+        ctx_init = cfg.TRAINER.MAPLE.VPROMPT_INIT # torch.nn.Prameter(torch.randn(2)) # for visual prompt
         dtype = clip_model.dtype
         ctx_dim = clip_model.ln_final.weight.shape[0]
         clip_imsize = clip_model.visual.input_resolution
@@ -81,7 +83,10 @@ class MultiModalPromptLearner(nn.Module):
         self.compound_prompts_depth = cfg.TRAINER.MAPLE.PROMPT_DEPTH  # max=12, but will create 11 such shared prompts
         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
+
+        # context vector init -> only need for text prompt
         if ctx_init and (n_ctx) <= 4:
+            # a photo of a 와 같이 prompt가 0이 아니고 number of context vectors가 4보다 작거나 같으면
             # use given words to initialize context vectors
             ctx_init = ctx_init.replace("_", " ")
             n_ctx = n_ctx
@@ -98,39 +103,45 @@ class MultiModalPromptLearner(nn.Module):
         print('MaPLe design: Multi-modal Prompt Learning')
         print(f'Initial context: "{prompt_prefix}"')
         print(f"Number of MaPLe context words (tokens): {n_ctx}")
+        
+
         # These below, related to the shallow prompts
         # Linear layer so that the tokens will project to 512 and will be initialized from 768
-        self.proj = nn.Linear(ctx_dim, 768)
+        #self.proj = nn.Linear(ctx_dim, 768)
+        self.proj = nn.Linear(768, ctx_dim)
         self.proj.half()
-        self.ctx = nn.Parameter(ctx_vectors)
+        #self.ctx = nn.Parameter(ctx_vectors)
+        self.ctx = nn.Parameter(ctx_init)
         # These below parameters related to the shared prompts
         # Define the compound prompts for the deeper layers
 
         # Minimum can be 1, which defaults to shallow MaPLe
         # compound prompts
+        # ParameterList를 사용해 복수의 프롬프트 벡터를 저장
         self.compound_prompts_text = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, 512))
                                                       for _ in range(self.compound_prompts_depth - 1)])
+        # 각각의 프롬프트마다
         for single_para in self.compound_prompts_text:
             nn.init.normal_(single_para, std=0.02)
         # Also make corresponding projection layers, for each prompt
-        single_layer = nn.Linear(ctx_dim, 768)
+        single_layer = nn.Linear(768, ctx_dim)
         self.compound_prompt_projections = _get_clones(single_layer, self.compound_prompts_depth - 1)
 
         classnames = [name.replace("_", " ") for name in classnames]
         name_lens = [len(_tokenizer.encode(name)) for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
-        tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])  # (n_cls, n_tkn)
+        tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])  # (n_cls, n_tkn) (클래스 이름 길이, n_tkn)
         with torch.no_grad():
             embedding = clip_model.token_embedding(tokenized_prompts).type(dtype)
-
+        
         # These token vectors will be saved when in save_model(),
         # but they should be ignored in load_model() as we want to use
         # those computed using the current class names
         self.register_buffer("token_prefix", embedding[:, :1, :])  # SOS
         self.register_buffer("token_suffix", embedding[:, 1 + n_ctx:, :])  # CLS, EOS
 
-        self.n_cls = n_cls
+        self.n_cls = n_cls # 클래스 이름 길이
         self.n_ctx = n_ctx
         self.tokenized_prompts = tokenized_prompts  # torch.Tensor
         self.name_lens = name_lens
@@ -164,13 +175,19 @@ class MultiModalPromptLearner(nn.Module):
 
         prefix = self.token_prefix
         suffix = self.token_suffix
-        prompts = self.construct_prompts(ctx, prefix, suffix)
+        #prompts = self.construct_prompts(ctx, prefix, suffix)
+        prompts = torch.cat([ctx], dim=1)
 
         # Before returning, need to transform
         # prompts to 768 for the visual side
         visual_deep_prompts = []
         for index, layer in enumerate(self.compound_prompt_projections):
             visual_deep_prompts.append(layer(self.compound_prompts_text[index]))
+
+        text_deep_prompts = []
+        for index, layer in enumerate(self.compound_prompt_projections):
+            text_deep_prompts.append(layer(self.compound_prompts_text[index]))
+
         # Now the other way around
         # We will project the textual prompts from 512 to 768
         return prompts, self.proj(self.ctx), self.compound_prompts_text, visual_deep_prompts   # pass here original, as for visual 768 is required
