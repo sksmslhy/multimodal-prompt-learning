@@ -120,6 +120,10 @@ class MultiModalPromptLearner(nn.Module):
         # ParameterList를 사용해 복수의 프롬프트 벡터를 저장
         self.compound_prompts_text = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, 512))
                                                       for _ in range(self.compound_prompts_depth - 1)])
+        self.compound_prompts_im = nn.ParameterList([nn.Parameter(torch.empty(n_ctx, 512))
+                                                      for _ in range(self.compound_prompts_depth - 1)])
+
+
         # 각각의 프롬프트마다
         for single_para in self.compound_prompts_text:
             nn.init.normal_(single_para, std=0.02)
@@ -186,17 +190,18 @@ class MultiModalPromptLearner(nn.Module):
 
         text_deep_prompts = []
         for index, layer in enumerate(self.compound_prompt_projections):
-            text_deep_prompts.append(layer(self.compound_prompts_text[index]))
+            text_deep_prompts.append(layer(self.compound_prompts_im[index]))
 
         # Now the other way around
         # We will project the textual prompts from 512 to 768
-        return prompts, self.proj(self.ctx), self.compound_prompts_text, visual_deep_prompts   # pass here original, as for visual 768 is required
+        #return prompts, self.proj(self.ctx), self.compound_prompts_text, visual_deep_prompts   # pass here original, as for visual 768 is required
+        return prompts, self.proj(self.ctx), self.compound_prompts_im, text_deep_prompts
 
 
 class CustomCLIP(nn.Module):
     def __init__(self, cfg, classnames, clip_model):
         super().__init__()
-        self.prompt_learner = MultiModalPromptLearner(cfg, classnames, clip_model)
+        self.prompt_learner = MultiModalPromptLearner(cfg, classnames, clip_model) # return prompts, self.proj(self.ctx), self.compound_prompts_im, text_deep_prompts
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.image_encoder = clip_model.visual
         self.text_encoder = TextEncoder(clip_model)
@@ -207,9 +212,10 @@ class CustomCLIP(nn.Module):
         tokenized_prompts = self.tokenized_prompts
         logit_scale = self.logit_scale.exp()
 
-        prompts, shared_ctx, deep_compound_prompts_text, deep_compound_prompts_vision = self.prompt_learner()
-        text_features = self.text_encoder(prompts, tokenized_prompts, deep_compound_prompts_text)
+        prompts, shared_ctx, deep_compound_prompts_vision, deep_compound_prompts_text = self.prompt_learner() # return prompts, self.proj(self.ctx), self.compound_prompts_im, text_deep_prompts
+        #text_features = self.text_encoder(prompts, tokenized_prompts, deep_compound_prompts_text)
         image_features = self.image_encoder(image.type(self.dtype), shared_ctx, deep_compound_prompts_vision)
+        text_features = self.text_encoder(prompts, tokenized_prompts, deep_compound_prompts_text)
 
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
@@ -269,7 +275,7 @@ class MaPLe(TrainerX):
         # NOTE: only give prompt_learner to the optimizer
         self.optim = build_optimizer(self.model, cfg.OPTIM)
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
-        self.register_model("MultiModalPromptLearner", self.model, self.optim, self.sched)
+        self.register_model("MultiModalPromptLearner", self.model, self.optim, self.sched) # MultiModalPromptLearner => return prompts, self.proj(self.ctx), self.compound_prompts_im, text_deep_prompts
 
         self.scaler = GradScaler() if cfg.TRAINER.MAPLE.PREC == "amp" else None
 
