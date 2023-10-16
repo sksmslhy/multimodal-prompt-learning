@@ -105,7 +105,8 @@ def extend_cfg(cfg):
     cfg.TRAINER.MAPLE = CN()
     cfg.TRAINER.MAPLE.N_CTX = 2  # number of context vectors
     cfg.TRAINER.MAPLE.CTX_INIT = "a photo of a"  # initialization words
-    cfg.TRAINER.MAPLE.VPROMPT_INIT = torch.nn.Prameter(torch.randn(2)) # for visual prompt
+    #cfg.TRAINER.MAPLE.VPROMPT_INIT = torch.nn.Parameter(torch.tensor(torch.randn(2))) # for visual prompt
+    cfg.TRAINER.MAPLE.VPROMPT_INIT = [2, 2]
     cfg.TRAINER.MAPLE.PREC = "fp16"  # fp16, fp32, amp
     cfg.TRAINER.MAPLE.PROMPT_DEPTH = 9 # Max 12, minimum 0, for 1 it will act as shallow MaPLe (J=1)
     cfg.DATASET.SUBSAMPLE_CLASSES = "all"  # all, base or new
